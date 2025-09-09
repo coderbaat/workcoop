@@ -59,6 +59,7 @@ async def handle(reader, writer):
         line = await reader.readline()
         if not line:
             break
+        print("Agent B received:", line.decode().strip())
         writer.write(line)
         await writer.drain()
     writer.close()
