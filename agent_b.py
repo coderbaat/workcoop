@@ -62,6 +62,7 @@ async def handle(reader, writer):
         print("Agent B received:", line.decode().strip())
         writer.write(line)
         await writer.drain()
+        print("Agent B echoed back:", line.decode().strip())
     writer.close()
     await writer.wait_closed()
 
