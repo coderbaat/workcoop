@@ -86,6 +86,7 @@ async def tcp_probe():
                 if t_send is None:
                     continue
                 rtt_ms = (time.monotonic_ns() - t_send)/1e6
+                print(f"Received echo: seq={s}, RTT={rtt_ms:.2f} ms, raw={line.decode().strip()}")
                 now = datetime.now(timezone.utc)
                 minute = now.replace(second=0,microsecond=0)
                 if last_window_minute and minute > last_window_minute:
