@@ -49,7 +49,7 @@ def upsert_stats(msg):
 # mqtt
 MQTT_CLIENT = mqtt.Client()
 MQTT_CLIENT.on_message = lambda client, userdata, msg: upsert_stats(msg.payload)
-MQTT_CLIENT.connect("localhost",1885)
+MQTT_CLIENT.connect("localhost",1885, 60)
 MQTT_CLIENT.subscribe("netstats/+/minute")
 MQTT_CLIENT.loop_start()
 
