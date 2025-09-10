@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", os.path.expanduser("~/.agent_a"))
 ID_FILE = os.path.join(STATE_DIR, "id")
-TCP_HOST = "127.0.0.1"
+TCP_HOST = "localhost"
 TCP_PORT = 4401
 RATE = 2  # probes/sec
 TIMEOUT_S = 2
 
-# ---------- UUID persistence ----------
+#UUID
 os.makedirs(STATE_DIR, exist_ok=True)
 if os.path.exists(ID_FILE):
     with open(ID_FILE) as f:
@@ -20,13 +20,13 @@ else:
     with open(ID_FILE, "w") as f:
         f.write(AGENT_ID)
 
-# ---------- MQTT setup ----------
+# mqtt
 MQTT_CLIENT = mqtt.Client()
 MQTT_CLIENT.connect("localhost", 1885)
 MQTT_CLIENT.loop_start()
 
-# ---------- Metrics state ----------
-in_flight = {}  # seq -> t_send_ns
+# metrics
+in_flight = {}  # seq to t_send_ns
 seq = 0
 window_acc = []
 last_window_minute = None
@@ -36,7 +36,7 @@ def compute_stats(records):
         return None
     rtts = [r['rtt'] for r in records]
     jitters = [abs(rtts[i]-rtts[i-1]) for i in range(1,len(rtts))] or [0]
-    return {
+    stats = {
         "latency_min_ms": min(rtts),
         "latency_max_ms": max(rtts),
         "latency_avg_ms": sum(rtts)/len(rtts),
@@ -47,6 +47,8 @@ def compute_stats(records):
         "received": len(records),
         "lost": sum(r.get('lost',0) for r in records)
     }
+    print("compute_stats() called →", stats)   # 👈 debug line
+    return stats
 
 async def tcp_probe():
     global seq, in_flight, window_acc, last_window_minute
@@ -74,7 +76,7 @@ async def tcp_probe():
             await asyncio.sleep(interval)
 
     async def recv_loop():
-        global last_window_minute
+        global last_window_minute, window_acc
         while True:
             line = await reader.readline()
             if not line:
@@ -103,6 +105,7 @@ async def tcp_probe():
                 continue
 
     async def timeout_sweep():
+        global window_acc
         while True:
             now_ns = time.monotonic_ns()
             lost_seqs = [s for s,t in in_flight.items() if now_ns-t>TIMEOUT_S*1e9]

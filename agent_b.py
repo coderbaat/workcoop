@@ -5,7 +5,7 @@ import paho.mqtt.client as mqtt
 TCP_PORT = 4401
 DB_FILE = "netstats.db"
 
-# ---------- SQLite ----------
+# sqlite connect
 conn = sqlite3.connect(DB_FILE)
 c = conn.cursor()
 c.execute("""
@@ -46,14 +46,14 @@ def upsert_stats(msg):
     ))
     conn.commit()
 
-# ---------- MQTT Subscriber ----------
+# mqtt
 MQTT_CLIENT = mqtt.Client()
 MQTT_CLIENT.on_message = lambda client, userdata, msg: upsert_stats(msg.payload)
 MQTT_CLIENT.connect("localhost",1885)
 MQTT_CLIENT.subscribe("netstats/+/minute")
 MQTT_CLIENT.loop_start()
 
-# ---------- TCP Echo ----------
+# tcp echo read write back
 async def handle(reader, writer):
     while True:
         line = await reader.readline()
