@@ -47,11 +47,28 @@ def upsert_stats(msg):
     conn.commit()
 
 # mqtt
+def on_connect(client, userdata, flags, rc):
+    print("MQTT connected:", rc)
+    client.subscribe("netstats/+/minute")
+    
+def on_message(client, userdata, msg):
+    try:
+        data = json.loads(msg.payload.decode())
+        upsert_stats(data)
+    except Exception as e:
+        print("Error handling message:", e)
+
 MQTT_CLIENT = mqtt.Client()
-MQTT_CLIENT.on_message = lambda client, userdata, msg: upsert_stats(msg.payload)
-MQTT_CLIENT.connect("localhost",1885, 60)
-MQTT_CLIENT.subscribe("netstats/+/minute")
-MQTT_CLIENT.loop_start()
+MQTT_CLIENT.on_connect = on_connect
+MQTT_CLIENT.on_message = on_message
+MQTT_CLIENT.connect("localhost", 1885)
+
+async def mqqt_loop():
+    while True:
+        MQTT_CLIENT.loop_read()
+        MQTT_CLIENT.loop_write()
+        MQTT_CLIENT.loop_misc()
+        await asyncio.sleep(0.1)
 
 # tcp echo read write back
 async def handle(reader, writer):
@@ -69,6 +86,9 @@ async def handle(reader, writer):
 async def main():
     server = await asyncio.start_server(handle, '0.0.0.0', TCP_PORT)
     async with server:
-        await server.serve_forever()
+        await asyncio.gather(
+        server.serve_forever(),
+        mqqt_loop()
+        )
 
 asyncio.run(main())
