@@ -26,8 +26,7 @@ CREATE TABLE IF NOT EXISTS minute_stats (
 """)
 conn.commit()
 
-def upsert_stats(msg):
-    data = json.loads(msg)
+def upsert_stats(data):
     c.execute("""
     INSERT INTO minute_stats VALUES (?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(agent_id, minute_utc) DO UPDATE SET
