@@ -96,7 +96,7 @@ async def tcp_probe():
                     stats = compute_stats(window_acc)
                     if stats:
                         stats_msg = {"agent_id": AGENT_ID, "time": last_window_minute.isoformat().replace("+00:00","Z"), **stats}
-                        MQTT_CLIENT.publish(f"netstats/{AGENT_ID}/minute", json.dumps(stats_msg))
+                        MQTT_CLIENT.publish(f"netstats/{AGENT_ID}/minute", json.dumps(stats_msg), qos=0, retain=False)
                         print("Published stats:", stats_msg)
                     window_acc = []
                 last_window_minute = minute
