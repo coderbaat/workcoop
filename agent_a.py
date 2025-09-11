@@ -112,7 +112,7 @@ async def tcp_probe():
             for s in lost_seqs:
                 in_flight.pop(s)
                 window_acc.append({"rtt": 0.0, "lost":1})
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
     await asyncio.gather(send_loop(), recv_loop(), timeout_sweep())
 
