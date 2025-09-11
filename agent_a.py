@@ -1,7 +1,13 @@
-#!/usr/bin/env python3
-import asyncio, json, uuid, os, time
+import asyncio
+import json
+import uuid
+import os
+import time
+from datetime import datetime, timedelta, timezone
+
+#!/usr/bin/env python3 
+
 import paho.mqtt.client as mqtt
-from datetime import datetime, timezone
 
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", os.path.expanduser("~/.agent_a"))
 ID_FILE = os.path.join(STATE_DIR, "id")
@@ -10,7 +16,7 @@ TCP_PORT = 4401
 RATE = 2  # probes/sec
 TIMEOUT_S = 2
 
-#UUID
+# UUID
 os.makedirs(STATE_DIR, exist_ok=True)
 if os.path.exists(ID_FILE):
     with open(ID_FILE) as f:
@@ -35,19 +41,19 @@ def compute_stats(records):
     if not records:
         return None
     rtts = [r['rtt'] for r in records]
-    jitters = [abs(rtts[i]-rtts[i-1]) for i in range(1,len(rtts))] or [0]
+    jitters = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))] or [0]
     stats = {
         "latency_min_ms": min(rtts),
         "latency_max_ms": max(rtts),
-        "latency_avg_ms": sum(rtts)/len(rtts),
+        "latency_avg_ms": sum(rtts) / len(rtts),
         "jitter_min_ms": min(jitters),
         "jitter_max_ms": max(jitters),
-        "jitter_avg_ms": sum(jitters)/len(jitters),
-        "sent": len(records)+sum(r.get('lost',0) for r in records),
+        "jitter_avg_ms": sum(jitters) / len(jitters),
+        "sent": len(records) + sum(r.get('lost', 0) for r in records),
         "received": len(records),
-        "lost": sum(r.get('lost',0) for r in records)
+        "lost": sum(r.get('lost', 0) for r in records)
     }
-    print("compute_stats() called →", stats)   # 👈 debug line
+    print("compute_stats() called →", stats)  # 👈 debug line
     return stats
 
 async def tcp_probe():
@@ -61,15 +67,15 @@ async def tcp_probe():
             break
         except Exception:
             await asyncio.sleep(backoff)
-            backoff = min(backoff*2, 5)
+            backoff = min(backoff * 2, 5)
 
     async def send_loop():
         global seq
-        interval = 1/RATE
+        interval = 1 / RATE
         while True:
             t_send_ns = time.monotonic_ns()
             packet = {"agent_id": AGENT_ID, "seq": seq, "t_send_ns": t_send_ns}
-            writer.write((json.dumps(packet)+"\n").encode())
+            writer.write((json.dumps(packet) + "\n").encode())
             await writer.drain()
             in_flight[seq] = t_send_ns
             seq = (seq + 1) % 65536
@@ -87,55 +93,49 @@ async def tcp_probe():
                 t_send = in_flight.pop(s, None)
                 if t_send is None:
                     continue
-
-                rtt_ms = (time.monotonic_ns() - t_send)/1e6
-
+                rtt_ms = (time.monotonic_ns() - t_send) / 1e6
+                print(f"Received echo: seq={s}, RTT={rtt_ms:.2f} ms, raw={line.decode().strip()}")
                 now = datetime.now(timezone.utc)
-                current_minute = now.replace(second=0, microsecond=0)
+                minute = now.replace(second=0, microsecond=0)
 
-                # First packet
-                if last_window_minute is None:
-                    last_window_minute = current_minute
-
-                if current_minute > last_window_minute:
-                    # Wait 2s grace period for late arrivals
-                    grace_end = last_window_minute.timestamp() + 60 + 2
-                    if now.timestamp() >= grace_end:
+                if last_window_minute:
+                    grace_end = last_window_minute + timedelta(seconds=62)  # 60s + 2s grace
+                    if now >= grace_end:
                         # finalize previous minute
                         stats = compute_stats(window_acc)
                         if stats:
                             stats_msg = {
                                 "agent_id": AGENT_ID,
-                                "time": last_window_minute.isoformat().replace("+00:00","Z"),
+                                "time": last_window_minute.isoformat().replace("+00:00", "Z"),
                                 **stats
                             }
-                            MQTT_CLIENT.publish(f"netstats/{AGENT_ID}/minute",
-                                                json.dumps(stats_msg),
-                                                qos=0, retain=False)
+                            MQTT_CLIENT.publish(
+                                f"netstats/{AGENT_ID}/minute",
+                                json.dumps(stats_msg),
+                                qos=0,
+                                retain=False
+                            )
                             print("Published stats:", stats_msg)
                         window_acc = []
-                        last_window_minute = current_minute
-
-                packet_minute = datetime.fromtimestamp(t_send / 1e9, tz=timezone.utc).replace(second=0, microsecond=0)
-                if packet_minute == last_window_minute:
-                    window_acc.append({"rtt": rtt_ms})
+                        last_window_minute = minute
                 else:
-                    window_acc.append({"rtt": 0.0, "lost": 1})
+                    # first assignment
+                    last_window_minute = minute
 
-            except Exception as e:
-                print("recv_loop error:", e)
+                # Always append the packet to the current window
+                window_acc.append({"rtt": rtt_ms})
+            except Exception:
                 continue
-
 
     async def timeout_sweep():
         global window_acc
         while True:
             now_ns = time.monotonic_ns()
-            lost_seqs = [s for s,t in in_flight.items() if now_ns-t>TIMEOUT_S*1e9]
+            lost_seqs = [s for s, t in in_flight.items() if now_ns - t > TIMEOUT_S * 1e9]
             for s in lost_seqs:
                 in_flight.pop(s)
-                window_acc.append({"rtt": 0.0, "lost":1})
-            await asyncio.sleep(0.1)
+                window_acc.append({"rtt": 0.0, "lost": 1})
+            await asyncio.sleep(0.2)
 
     await asyncio.gather(send_loop(), recv_loop(), timeout_sweep())
 
