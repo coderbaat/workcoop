@@ -87,22 +87,45 @@ async def tcp_probe():
                 t_send = in_flight.pop(s, None)
                 if t_send is None:
                     continue
+
                 rtt_ms = (time.monotonic_ns() - t_send)/1e6
-                print(f"Received echo: seq={s}, RTT={rtt_ms:.2f} ms, raw={line.decode().strip()}")
+
                 now = datetime.now(timezone.utc)
-                minute = now.replace(second=0,microsecond=0)
-                if last_window_minute and minute > last_window_minute:
-                    # finalize previous minute
-                    stats = compute_stats(window_acc)
-                    if stats:
-                        stats_msg = {"agent_id": AGENT_ID, "time": last_window_minute.isoformat().replace("+00:00","Z"), **stats}
-                        MQTT_CLIENT.publish(f"netstats/{AGENT_ID}/minute", json.dumps(stats_msg), qos=0, retain=False)
-                        print("Published stats:", stats_msg)
-                    window_acc = []
-                last_window_minute = minute
-                window_acc.append({"rtt": rtt_ms})
-            except Exception:
+                current_minute = now.replace(second=0, microsecond=0)
+
+                # First packet
+                if last_window_minute is None:
+                    last_window_minute = current_minute
+
+                if current_minute > last_window_minute:
+                    # Wait 2s grace period for late arrivals
+                    grace_end = last_window_minute.timestamp() + 60 + 2
+                    if now.timestamp() >= grace_end:
+                        # finalize previous minute
+                        stats = compute_stats(window_acc)
+                        if stats:
+                            stats_msg = {
+                                "agent_id": AGENT_ID,
+                                "time": last_window_minute.isoformat().replace("+00:00","Z"),
+                                **stats
+                            }
+                            MQTT_CLIENT.publish(f"netstats/{AGENT_ID}/minute",
+                                                json.dumps(stats_msg),
+                                                qos=0, retain=False)
+                            print("Published stats:", stats_msg)
+                        window_acc = []
+                        last_window_minute = current_minute
+
+                packet_minute = datetime.fromtimestamp(t_send / 1e9, tz=timezone.utc).replace(second=0, microsecond=0)
+                if packet_minute == last_window_minute:
+                    window_acc.append({"rtt": rtt_ms})
+                else:
+                    window_acc.append({"rtt": 0.0, "lost": 1})
+
+            except Exception as e:
+                print("recv_loop error:", e)
                 continue
+
 
     async def timeout_sweep():
         global window_acc
