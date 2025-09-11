@@ -100,7 +100,7 @@ async def tcp_probe():
 
                 if last_window_minute:
                     grace_end = last_window_minute + timedelta(seconds=62)  # 60s + 2s grace
-                    if now >= grace_end:
+                    if now > grace_end:
                         # finalize previous minute
                         stats = compute_stats(window_acc)
                         if stats:
