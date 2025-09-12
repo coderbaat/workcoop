@@ -3,10 +3,9 @@ import json
 import uuid
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-#!/usr/bin/env python3 
-
+#!/usr/bin/env python3
 import paho.mqtt.client as mqtt
 
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", os.path.expanduser("~/.agent_a"))
@@ -14,8 +13,7 @@ ID_FILE = os.path.join(STATE_DIR, "id")
 TCP_HOST = "localhost"
 TCP_PORT = 4401
 RATE = 2  # probes/sec
-TIMEOUT_S = 2
-
+TIMEOUT_S = 2  
 # UUID
 os.makedirs(STATE_DIR, exist_ok=True)
 if os.path.exists(ID_FILE):
@@ -97,32 +95,24 @@ async def tcp_probe():
                 print(f"Received echo: seq={s}, RTT={rtt_ms:.2f} ms, raw={line.decode().strip()}")
                 now = datetime.now(timezone.utc)
                 minute = now.replace(second=0, microsecond=0)
-
-                if last_window_minute:
-                    grace_end = last_window_minute + timedelta(seconds=62)  # 60s + 2s grace
-                    if now > grace_end:
-                        # finalize previous minute
-                        stats = compute_stats(window_acc)
-                        if stats:
-                            stats_msg = {
-                                "agent_id": AGENT_ID,
-                                "time": last_window_minute.isoformat().replace("+00:00", "Z"),
-                                **stats
-                            }
-                            MQTT_CLIENT.publish(
-                                f"netstats/{AGENT_ID}/minute",
-                                json.dumps(stats_msg),
-                                qos=0,
-                                retain=False
-                            )
-                            print("Published stats:", stats_msg)
-                        window_acc = []
-                        last_window_minute = minute
-                else:
-                    # first assignment
-                    last_window_minute = minute
-
-                # Always append the packet to the current window
+                if last_window_minute and minute > last_window_minute:
+                    # finalize previous minute
+                    stats = compute_stats(window_acc)
+                    if stats:
+                        stats_msg = {
+                            "agent_id": AGENT_ID,
+                            "time": last_window_minute.isoformat().replace("+00:00", "Z"),
+                            **stats
+                        }
+                        MQTT_CLIENT.publish(
+                            f"netstats/{AGENT_ID}/minute",
+                            json.dumps(stats_msg),
+                            qos=0,
+                            retain=False
+                        )
+                        print("Published stats:", stats_msg)
+                    window_acc = []
+                last_window_minute = minute
                 window_acc.append({"rtt": rtt_ms})
             except Exception:
                 continue
@@ -135,7 +125,7 @@ async def tcp_probe():
             for s in lost_seqs:
                 in_flight.pop(s)
                 window_acc.append({"rtt": 0.0, "lost": 1})
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
     await asyncio.gather(send_loop(), recv_loop(), timeout_sweep())
 
