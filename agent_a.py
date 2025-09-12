@@ -103,7 +103,7 @@ def publish_minute_stats(minute, records):
     )
     print(f"Published stats for {time_str}: {stats_msg}")
 
-async def connection_manager():
+async def tcp_handle():
     """Manages TCP connection with automatic reconnection"""
     global connection_state
     backoff = 0.5
@@ -111,7 +111,6 @@ async def connection_manager():
     while True:
         if not connection_state["connected"]:
             try:
-                print(f"Attempting to connect to {TCP_HOST}:{TCP_PORT}")
                 reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
                 connection_state["reader"] = reader
                 connection_state["writer"] = writer
@@ -146,25 +145,21 @@ async def send_loop():
         packet = {"agent_id": AGENT_ID, "seq": seq, "t_send_ns": t_send_ns}
         packet_data = (json.dumps(packet) + "\n").encode()
         
-        # Always record the probe as sent (for timeout tracking)
+        # record the probe as sent (for timeout tracking)
         in_flight[seq] = t_send_ns
         
         if connection_state["connected"] and connection_state["writer"]:
             try:
                 connection_state["writer"].write(packet_data)
                 await connection_state["writer"].drain()
-                print(f"Sent probe seq={seq}")
+                print(f"Sent seq={seq}")
             except Exception as e:
-                print(f"Send failed for seq={seq}: {e}")
+                print(f"Send failed seq={seq}: {e}")
                 connection_state["connected"] = False
         else:
-            print(f"No connection, probe seq={seq} will timeout")
+            print(f"No connection, probe seq={seq} timeout")
         
         seq = (seq + 1) % 65536
-        
-        
-        
-        
         await asyncio.sleep(interval)
         
 
@@ -180,7 +175,7 @@ async def recv_loop():
         try:
             line = await connection_state["reader"].readline()
             if not line:
-                print("Connection closed by server")
+                print("Connection closed")
                 connection_state["connected"] = False
                 continue
             
@@ -258,9 +253,8 @@ async def timeout_sweep():
         await asyncio.sleep(0.1)
 
 async def main():
-    """Main function that runs all components concurrently"""
     await asyncio.gather(
-        connection_manager(),
+        tcp_handle(),
         send_loop(),
         recv_loop(),
         timeout_sweep()
