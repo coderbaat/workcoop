@@ -27,7 +27,7 @@ else:
 
 # mqtt
 MQTT_CLIENT = mqtt.Client()
-MQTT_CLIENT.connect("localhost", 1885)  # Changed to standard MQTT port
+MQTT_CLIENT.connect("localhost", 1885)
 MQTT_CLIENT.loop_start()
 
 # metrics
@@ -35,6 +35,9 @@ in_flight = {}  # seq to t_send_ns
 seq = 0
 current_window = {"data": [], "minute": None}
 pending_window = {"data": [], "minute": None}
+
+# Connection state
+connection_state = {"reader": None, "writer": None, "connected": False}
 
 def compute_stats(records):
     if not records:
@@ -62,7 +65,7 @@ def compute_stats(records):
         jitters = [abs(valid_rtts[i] - valid_rtts[i-1]) for i in range(1, len(valid_rtts))]
     
     if not jitters:
-        jitters = [0.0]  # If only one RTT, jitter is zero
+        jitters = [0.0]
     
     stats = {
         "latency_min_ms": min(valid_rtts),
@@ -100,132 +103,168 @@ def publish_minute_stats(minute, records):
     )
     print(f"Published stats for {time_str}: {stats_msg}")
 
-async def tcp_probe():
-    global seq, in_flight, current_window, pending_window
+async def connection_manager():
+    """Manages TCP connection with automatic reconnection"""
+    global connection_state
     backoff = 0.5
     
     while True:
-        try:
-            reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
-            backoff = 0.5
-            print("TCP connected")
-            break
-        except Exception as e:
-            print(f"Connection failed: {e}, retrying in {backoff}s")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 5)
-
-    async def send_loop():
-        global seq
-        interval = 1 / RATE
-        next_send_time = time.monotonic()
-        
-        while True:
-            # Send packet
-            t_send_ns = time.monotonic_ns()
-            packet = {"agent_id": AGENT_ID, "seq": seq, "t_send_ns": t_send_ns}
-            writer.write((json.dumps(packet) + "\n").encode())
-            await writer.drain()
-            
-            in_flight[seq] = t_send_ns
-            seq = (seq + 1) % 65536
-            
-            # Maintain precise timing
-            next_send_time += interval
-            current_time = time.monotonic()
-            sleep_time = next_send_time - current_time
-            
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-            else:
-                next_send_time = current_time
-
-    async def recv_loop():
-        global current_window, pending_window
-        
-        while True:
-            line = await reader.readline()
-            if not line:
-                break
-            
+        if not connection_state["connected"]:
             try:
-                data = json.loads(line)
-                s = data["seq"]
-                t_send = in_flight.pop(s, None)
-                
-                if t_send is None:
-                    continue  # if late packet
-                
-                rtt_ms = (time.monotonic_ns() - t_send) / 1e6
-                print(f"Received echo: seq={s}, RTT={rtt_ms:.2f} ms")
-                
-                now = datetime.now(timezone.utc)
-                current_minute = now.replace(second=0, microsecond=0)
-                
-                # Handle window transitions and grace period
-                if current_window["minute"] is None:
-                    # First packet
-                    current_window["minute"] = current_minute
-                    current_window["data"] = []
-                
-                elif current_minute > current_window["minute"]:
-                    # New minute started - move current to pending
-                    if current_window["data"]:
-                        pending_window = {
-                            "minute": current_window["minute"],
-                            "data": current_window["data"].copy()
-                        }
-                    
-                    # Start new current window
-                    current_window = {
-                        "minute": current_minute,
-                        "data": []
+                print(f"Attempting to connect to {TCP_HOST}:{TCP_PORT}")
+                reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
+                connection_state["reader"] = reader
+                connection_state["writer"] = writer
+                connection_state["connected"] = True
+                backoff = 0.5
+                print("TCP connected successfully")
+            except Exception as e:
+                print(f"Connection failed: {e}, retrying in {backoff}s")
+                connection_state["connected"] = False
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 5)
+        else:
+            # Check if connection is still alive
+            try:
+                if connection_state["writer"] and connection_state["writer"].is_closing():
+                    raise Exception("Writer is closing")
+                await asyncio.sleep(1)  # Check every second
+            except:
+                print("Connection lost, will reconnect")
+                connection_state["connected"] = False
+                connection_state["reader"] = None
+                connection_state["writer"] = None
+
+async def send_loop():
+    """Continuously sends probes regardless of connection state"""
+    global seq
+    interval = 1 / RATE
+    next_send_time = time.monotonic()
+    
+    while True:
+        t_send_ns = time.monotonic_ns()
+        packet = {"agent_id": AGENT_ID, "seq": seq, "t_send_ns": t_send_ns}
+        packet_data = (json.dumps(packet) + "\n").encode()
+        
+        # Always record the probe as sent (for timeout tracking)
+        in_flight[seq] = t_send_ns
+        
+        if connection_state["connected"] and connection_state["writer"]:
+            try:
+                connection_state["writer"].write(packet_data)
+                await connection_state["writer"].drain()
+                print(f"Sent probe seq={seq}")
+            except Exception as e:
+                print(f"Send failed for seq={seq}: {e}")
+                connection_state["connected"] = False
+        else:
+            print(f"No connection, probe seq={seq} will timeout")
+        
+        seq = (seq + 1) % 65536
+        
+        
+        
+        
+        await asyncio.sleep(interval)
+        
+
+async def recv_loop():
+    """Receives responses when connection is available"""
+    global current_window, pending_window
+    
+    while True:
+        if not connection_state["connected"] or not connection_state["reader"]:
+            await asyncio.sleep(0.1)
+            continue
+        
+        try:
+            line = await connection_state["reader"].readline()
+            if not line:
+                print("Connection closed by server")
+                connection_state["connected"] = False
+                continue
+            
+            data = json.loads(line)
+            s = data["seq"]
+            t_send = in_flight.pop(s, None)
+            
+            if t_send is None:
+                continue
+            
+            rtt_ms = (time.monotonic_ns() - t_send) / 1e6
+            print(f"Received echo: seq={s}, RTT={rtt_ms:.2f} ms")
+            
+            now = datetime.now(timezone.utc)
+            current_minute = now.replace(second=0, microsecond=0)
+            
+            # Handle window transitions
+            if current_window["minute"] is None:
+                current_window["minute"] = current_minute
+                current_window["data"] = []
+            
+            elif current_minute > current_window["minute"]:
+                if current_window["data"]:
+                    pending_window = {
+                        "minute": current_window["minute"],
+                        "data": current_window["data"].copy()
                     }
                 
-                # Add packet to appropriate window
-                if current_window["minute"] == current_minute:
-                    # Packet belongs to current minute
-                    current_window["data"].append({"rtt": rtt_ms})
-                    
-                elif (pending_window["minute"] and 
-                      pending_window["minute"] == current_minute - timedelta(minutes=1) and
-                      now <= pending_window["minute"] + timedelta(seconds=60 + TIMEOUT_S)):
-                    # Late packet within grace period for previous minute
-                    pending_window["data"].append({"rtt": rtt_ms})
-                    print(f"Late packet added to minute {pending_window['minute']}")
-                else:
-                    print(f"Packet too late, discarded: current_minute={current_minute}")
+                current_window = {
+                    "minute": current_minute,
+                    "data": []
+                }
+            
+            # Add packet to appropriate window
+            if current_window["minute"] == current_minute:
+                current_window["data"].append({"rtt": rtt_ms})
+            elif (pending_window["minute"] and 
+                  pending_window["minute"] == current_minute - timedelta(minutes=1) and
+                  now <= pending_window["minute"] + timedelta(seconds=60 + TIMEOUT_S)):
+                pending_window["data"].append({"rtt": rtt_ms})
+                print(f"Late packet added to minute {pending_window['minute']}")
+            else:
+                print(f"Packet too late, discarded: current_minute={current_minute}")
                 
-            except Exception as e:
-                print(f"Error processing packet: {e}")
+        except Exception as e:
+            print(f"Error in recv_loop: {e}")
+            connection_state["connected"] = False
 
-    async def timeout_sweep():
-        global current_window, pending_window
+async def timeout_sweep():
+    """Handles timeouts and window management"""
+    global current_window, pending_window
+    
+    while True:
+        now_ns = time.monotonic_ns()
+        now_dt = datetime.now(timezone.utc)
         
-        while True:
-            now_ns = time.monotonic_ns()
-            now_dt = datetime.now(timezone.utc)
+        # Handle timeouts
+        lost_seqs = [s for s, t_send in in_flight.items() 
+                    if now_ns - t_send > TIMEOUT_S * 1e9]
+        
+        for s in lost_seqs:
+            in_flight.pop(s)
+            print(f"Timeout: seq={s}")
+            # Add lost packet to current window
+            if current_window["minute"]:
+                current_window["data"].append({"rtt": 0.0, "lost": True})
+        
+        # Check if pending window's grace period has expired
+        if (pending_window["minute"] and 
+            now_dt > pending_window["minute"] + timedelta(seconds=60 + TIMEOUT_S)):
             
-            # Handle timeouts
-            lost_seqs = [s for s, t_send in in_flight.items() 
-                        if now_ns - t_send > TIMEOUT_S * 1e9]
-            
-            for s in lost_seqs:
-                in_flight.pop(s)
-                # Add lost packet to current window
-                if current_window["minute"]:
-                    current_window["data"].append({"rtt": 0.0, "lost": True})
-            
-            # Check if pending window's grace period has expired
-            if (pending_window["minute"] and 
-                now_dt > pending_window["minute"] + timedelta(seconds=60 + TIMEOUT_S)):
-                
-                publish_minute_stats(pending_window["minute"], pending_window["data"])
-                pending_window = {"data": [], "minute": None}
-            
-            await asyncio.sleep(0.1)
+            publish_minute_stats(pending_window["minute"], pending_window["data"])
+            pending_window = {"data": [], "minute": None}
+        
+        await asyncio.sleep(0.1)
 
-    await asyncio.gather(send_loop(), recv_loop(), timeout_sweep())
+async def main():
+    """Main function that runs all components concurrently"""
+    await asyncio.gather(
+        connection_manager(),
+        send_loop(),
+        recv_loop(),
+        timeout_sweep()
+    )
 
 if __name__ == "__main__":
-    asyncio.run(tcp_probe())
+    asyncio.run(main())
