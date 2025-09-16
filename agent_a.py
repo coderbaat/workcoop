@@ -1,17 +1,18 @@
+#!/usr/bin/env python3
 import asyncio
 import json
 import uuid
 import os
 import time
 from datetime import datetime, timezone, timedelta
+import socket
 
-#!/usr/bin/env python3
 import paho.mqtt.client as mqtt
 
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", os.path.expanduser("~/.agent_a"))
 ID_FILE = os.path.join(STATE_DIR, "id")
-TCP_HOST = "localhost"
-TCP_PORT = 4401
+UDP_HOST = "localhost"
+UDP_PORT = 4401
 RATE = 2  # probes/sec
 TIMEOUT_S = 2  
 
@@ -27,7 +28,7 @@ else:
 
 # mqtt
 MQTT_CLIENT = mqtt.Client()
-MQTT_CLIENT.connect("localhost", 1885)
+MQTT_CLIENT.connect("localhost", 1883)
 MQTT_CLIENT.loop_start()
 
 # metrics
@@ -36,8 +37,8 @@ seq = 0
 current_window = {"data": [], "minute": None}
 pending_window = {"data": [], "minute": None}
 
-# Connection state
-connection_state = {"reader": None, "writer": None, "connected": False}
+# UDP socket
+udp_socket = None
 
 def compute_stats(records):
     if not records:
@@ -102,85 +103,48 @@ def publish_minute_stats(minute, records):
         retain=False
     )
     print(f"Published stats for {time_str}: {stats_msg}")
+# to set up udp socket
+async def udp_setup():
+    global udp_socket
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.setblocking(False)
+    print("UDP socket created")
 
-async def tcp_handle():
-    """Manages TCP connection with automatic reconnection"""
-    global connection_state
-    backoff = 0.5
-    
-    while True:
-        if not connection_state["connected"]:
-            try:
-                reader, writer = await asyncio.open_connection(TCP_HOST, TCP_PORT)
-                connection_state["reader"] = reader
-                connection_state["writer"] = writer
-                connection_state["connected"] = True
-                backoff = 0.5
-                print("TCP connected successfully")
-            except Exception as e:
-                print(f"Connection failed: {e}, retrying in {backoff}s")
-                connection_state["connected"] = False
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 5)
-        else:
-            # Check if connection is still alive
-            try:
-                if connection_state["writer"] and connection_state["writer"].is_closing():
-                    raise Exception("Writer is closing")
-                await asyncio.sleep(1)  # Check every second
-            except:
-                print("Connection lost, will reconnect")
-                connection_state["connected"] = False
-                connection_state["reader"] = None
-                connection_state["writer"] = None
-
+#send probe continuously
 async def send_loop():
-    """Continuously sends probes regardless of connection state"""
     global seq
     interval = 1 / RATE
-    next_send_time = time.monotonic()
     
     while True:
         t_send_ns = time.monotonic_ns()
         packet = {"agent_id": AGENT_ID, "seq": seq, "t_send_ns": t_send_ns}
-        packet_data = (json.dumps(packet) + "\n").encode()
+        packet_data = json.dumps(packet).encode()
         
         # record the probe as sent (for timeout tracking)
         in_flight[seq] = t_send_ns
         
-        if connection_state["connected"] and connection_state["writer"]:
-            try:
-                connection_state["writer"].write(packet_data)
-                await connection_state["writer"].drain()
-                print(f"Sent seq={seq}")
-            except Exception as e:
-                print(f"Send failed seq={seq}: {e}")
-                connection_state["connected"] = False
-        else:
-            print(f"No connection, probe seq={seq} timeout")
+        try:
+            await asyncio.get_event_loop().sock_sendto(
+                udp_socket, packet_data, (UDP_HOST, UDP_PORT)
+            )
+            print(f"Sent seq={seq}")
+        except Exception as e:
+            print(f"Send failed seq={seq}: {e}")
         
         seq = (seq + 1) % 65536
         await asyncio.sleep(interval)
-        
 
 async def recv_loop():
-    """Receives responses when connection is available"""
+    # Receives responses via UDP
     global current_window, pending_window
     
     while True:
-        if not connection_state["connected"] or not connection_state["reader"]:
-            await asyncio.sleep(0.1)
-            continue
-        
         try:
-            line = await connection_state["reader"].readline()
-            if not line:
-                print("Connection closed")
-                connection_state["connected"] = False
-                continue
+            # Receive UDP packet, 4096 byte size
+            data, addr = await asyncio.get_event_loop().sock_recvfrom(udp_socket, 4096)
             
-            data = json.loads(line)
-            s = data["seq"]
+            response = json.loads(data.decode())
+            s = response["seq"]
             t_send = in_flight.pop(s, None)
             
             if t_send is None:
@@ -222,10 +186,10 @@ async def recv_loop():
                 
         except Exception as e:
             print(f"Error in recv_loop: {e}")
-            connection_state["connected"] = False
+            await asyncio.sleep(0.01)
 
 async def timeout_sweep():
-    """Handles timeouts and window management"""
+    #Handles timeouts and window management
     global current_window, pending_window
     
     while True:
@@ -253,8 +217,8 @@ async def timeout_sweep():
         await asyncio.sleep(0.1)
 
 async def main():
+    await udp_setup()
     await asyncio.gather(
-        tcp_handle(),
         send_loop(),
         recv_loop(),
         timeout_sweep()

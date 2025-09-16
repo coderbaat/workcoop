@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-import asyncio, sqlite3, json
+import asyncio
+import sqlite3
+import json
+import socket
+
 import paho.mqtt.client as mqtt
 
-TCP_PORT = 4401
+UDP_PORT = 4401
 DB_FILE = "netstats.db"
 
 # sqlite connect
@@ -54,40 +58,53 @@ def on_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload.decode())
         upsert_stats(data)
+        print(f"Stored stats for agent {data['agent_id']} at {data['time']}")
     except Exception as e:
         print("Error handling message:", e)
 
 MQTT_CLIENT = mqtt.Client()
 MQTT_CLIENT.on_connect = on_connect
 MQTT_CLIENT.on_message = on_message
-MQTT_CLIENT.connect("localhost", 1885)
+MQTT_CLIENT.connect("localhost", 1883)
 
-async def mqqt_loop():
+async def mqtt_loop():
     while True:
         MQTT_CLIENT.loop_read()
         MQTT_CLIENT.loop_write()
         MQTT_CLIENT.loop_misc()
         await asyncio.sleep(0.1)
 
-# tcp echo read write back
-async def handle(reader, writer):
+# UDP echo server
+async def udp_echo_server():
+    # Create UDP socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    sock.bind(('0.0.0.0', UDP_PORT))
+    
+    print(f"UDP echo server listening on port {UDP_PORT}")
+    
     while True:
-        line = await reader.readline()
-        if not line:
-            break
-        print("Agent B received:", line.decode().strip())
-        writer.write(line)
-        await writer.drain()
-        print("Agent B echoed back:", line.decode().strip())
-    writer.close()
-    await writer.wait_closed()
+        try:
+            # Receive packet
+            data, addr = await asyncio.get_event_loop().sock_recvfrom(sock, 4096)
+            
+            # Parse and log
+            packet = json.loads(data.decode())
+            print(f"Agent B received from {addr}: seq={packet['seq']}")
+            
+            # Echo back immediately with print
+            await asyncio.get_event_loop().sock_sendto(sock, data, addr)
+            print(f"Agent B echoed back: seq={packet['seq']}")
+            
+        except Exception as e:
+            print(f"Error in UDP echo server: {e}")
+            await asyncio.sleep(0.01)
 
 async def main():
-    server = await asyncio.start_server(handle, '0.0.0.0', TCP_PORT)
-    async with server:
-        await asyncio.gather(
-        server.serve_forever(),
-        mqqt_loop()
-        )
+    await asyncio.gather(
+        udp_echo_server(),
+        mqtt_loop()
+    )
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
