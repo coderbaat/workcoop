@@ -57,9 +57,13 @@ def generate_html():
     c = conn.cursor()
     c.execute("""
     SELECT minute_utc, latency_avg_ms, jitter_avg_ms
-    FROM minute_stats
-    ORDER BY minute_utc DESC
-    LIMIT 240
+    FROM (
+        SELECT minute_utc, latency_avg_ms, jitter_avg_ms
+        FROM minute_stats
+        ORDER BY minute_utc DESC
+        LIMIT 240
+    )
+    ORDER BY minute_utc ASC
     """)
     rows = [{"minute": r[0], "latency": r[1], "jitter": r[2]} for r in c.fetchall()]
     conn.close()
@@ -68,6 +72,7 @@ def generate_html():
     with open(OUT_FILE, "w") as f:
         f.write(html)
     print(f"[+] Wrote {OUT_FILE} at {time.strftime('%X')}")
+
 
 if __name__ == "__main__":
     last_minute = None
