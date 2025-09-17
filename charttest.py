@@ -61,7 +61,7 @@ def generate_html():
         SELECT minute_utc, latency_avg_ms, jitter_avg_ms
         FROM minute_stats
         ORDER BY minute_utc DESC
-        LIMIT 240
+        LIMIT 200
     )
     ORDER BY minute_utc ASC
     """)
